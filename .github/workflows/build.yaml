@@ -1,0 +1,51 @@
+name: Build DisconnectAppNetwork
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install make ldid xz dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Build tweak
+        run: |
+          make clean
+          make package FINALPACKAGE=1
+
+      - name: Patch dylib dependency for LiveContainer
+        run: |
+          mkdir -p artifacts
+          DYLIB=$(find .theos -name "AutoDismiss.dylib" | head -n 1)
+
+          echo "Found dylib: $DYLIB"
+
+          otool -L "$DYLIB"
+
+          install_name_tool \
+            -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
+            @rpath/CydiaSubstrate.framework/CydiaSubstrate \
+            "$DYLIB"
+
+          otool -L "$DYLIB"
+
+          cp "$DYLIB" artifacts/
+          cp AutoDismiss.plist artifacts/ 2>/dev/null || true
+          cp packages/*.deb artifacts/ 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DisconnectAppNetwork-LiveContainer
+          path: artifacts/*
