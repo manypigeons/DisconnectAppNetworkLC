@@ -9,43 +9,92 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: brew install make ldid xz dpkg
 
       - name: Install Theos
         run: |
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
       - name: Build tweak
         run: |
           make clean
-          make package FINALPACKAGE=1
+          make package FINALPACKAGE=1 ARCHS=arm64
 
-      - name: Patch dylib dependency for LiveContainer
+      - name: Locate and patch dylib for LiveContainer
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p artifacts
-          DYLIB=$(find .theos -name "AutoDismiss.dylib" | head -n 1)
+
+          echo "Built dylibs:"
+          find .theos -type f -name "*.dylib" -print || true
+
+          DYLIB="$(find .theos \
+            -type f \
+            -name "DisconnectAppNetwork.dylib" \
+            -print \
+            -quit)"
+
+          if [[ -z "$DYLIB" ]]; then
+            echo "::error::DisconnectAppNetwork.dylib was not found."
+
+            echo "Available files in .theos:"
+            find .theos -type f -print || true
+
+            exit 1
+          fi
 
           echo "Found dylib: $DYLIB"
 
+          echo "Dependencies before patching:"
           otool -L "$DYLIB"
 
-          install_name_tool \
-            -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
-            @rpath/CydiaSubstrate.framework/CydiaSubstrate \
-            "$DYLIB"
+          SUBSTRATE_PATH="/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
 
+          if otool -L "$DYLIB" | grep -Fq "$SUBSTRATE_PATH"; then
+            install_name_tool \
+              -change "$SUBSTRATE_PATH" \
+              "@rpath/CydiaSubstrate.framework/CydiaSubstrate" \
+              "$DYLIB"
+
+            echo "Patched CydiaSubstrate dependency."
+          else
+            echo "Rootful CydiaSubstrate dependency was not found."
+          fi
+
+          echo "Dependencies after patching:"
           otool -L "$DYLIB"
+
+          # install_name_tool invalidates the existing code signature.
+          codesign --force --sign - "$DYLIB"
 
           cp "$DYLIB" artifacts/
-          cp AutoDismiss.plist artifacts/ 2>/dev/null || true
-          cp packages/*.deb artifacts/ 2>/dev/null || true
+
+          if [[ -f "DisconnectAppNetwork.plist" ]]; then
+            cp "DisconnectAppNetwork.plist" artifacts/
+          else
+            echo "DisconnectAppNetwork.plist was not found at repository root."
+          fi
+
+          if [[ -d "packages" ]]; then
+            find packages \
+              -type f \
+              -name "*.deb" \
+              -exec cp {} artifacts/ \;
+          fi
+
+          echo "Final artifacts:"
+          find artifacts -type f -print
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: DisconnectAppNetwork-LiveContainer
-          path: artifacts/*
+          path: artifacts/
+          if-no-files-found: error
